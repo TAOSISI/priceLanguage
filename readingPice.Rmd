@@ -1,0 +1,278 @@
+---
+title: "价格语言"
+author:
+  - 陶成思
+documentclass: ctexart
+output:
+  rticles::ctex:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+classoption: "hyperref,"
+---
+```{r}
+knitr::opts_chunk$set(warning = F, message = F)
+```
+## 环境设置
+```{r}
+# envrionment
+rm(list=ls())
+gc()
+
+#读取包
+library(dplyr)
+library(zoo)
+library(graphics)
+library(ggplot2)
+library(PerformanceAnalytics)
+library(TTR)
+library(hht)
+library(scatterplot3d)
+```
+来自招商证券——债市博弈论（一）｜读懂“价格语言”
+驱动价格的“二元力量”。市场之“道”是变化，在此基础上，衍生出两种基本驱动力量：发散和收敛。“发散”意味着不断强化，从而形成“趋势”；“收敛”意味着均值回归，从而形成“波动”。再复杂的价格，都可以拆分成上述两种形态的叠加。我们通过MT和HT两个指标来识别这两种形态。
+“MT指标”用于识别趋势。指标包含两个部分，第一部分追踪利率变动的方向，第二部分用于追踪利率变动的速度。其中，第二个条件判定利率“斜率”的二阶导，其灵敏度较高，能够比较早的识别趋势转向的早期信号。“HT指标”用于识别波动。基本原理是，通过希尔伯特变换，找出金融时间序列数据中的规律，并通过当前信号所处于周期中的位置，对未来变动方向进行预测。寻找“共振窗口”。当趋势和波动均处于向上窗口时，发出看空信号；当趋势和波动均处于向下窗口时，发出看多信号；当趋势和波动指标发生矛盾之时，不进行方向判定，认为利率处于“震荡期”。
+
+#趋势与波动的识别
+考虑到重要性原则，本文首先针对中国10年期国债收益率走势进行趋势和波动的指标构建。
+##识别趋势
+现有的趋势跟踪类指标不在少数，移动平均线、MACD、Trix等都已有广泛的应用。我们首先基于“拿来主义”进行回测，发现对于经常出现窄区间震荡的中国10年期国债收益率来说，这些指标比较容易出现反复错判，胜率不高。因此，我们在构造趋势跟踪指标的时候，除了使用常用的“方向”指标外，还加入了反映“速度”的二阶导指标，以期更为灵敏的把握利率趋势。
+ 
+具体而言，我们构建自定义的“MT指标”。MT指标包含两个部分，第一个部分用于追踪利率变动的方向，第二个部分用于追踪利率变动的速度。
+ 
+MT指标的计算方法：
+ 
+•   MTM_{t} = i_{t}-i_{t-n}
+•   MAMTM_{t} = MTM_{t}的m日移动平均
+•   △MT_{t}=MTM_{t}-MAMTM_{t}
+```{r}
+MT_calculator <- function(int_data,series_name, MT_m, MT_n){
+  #int_data <- data
+  #series_name <- 'R_10'
+  interestArray <- int_data[,series_name]
+  #MT_m <- 60
+  #MT_n <- 40
+  #创建空序列
+  MTM <- rep(NA, length(interestArray))
+  delta_MT <- rep(NA, length(interestArray))
+  MAMTM <-  rep(NA, length(interestArray))
+  #循环体，计算MT指标
+  for(i in c((MT_n+1):length(interestArray))){
+    MTM[i] <- interestArray[i] - interestArray[i-MT_n]
+    MAMTM[i] <- mean(MTM[(i-MT_m+1):i])
+    delta_MT[i] <- MTM[i] - MAMTM[i]
+  }
+  int_data <- as.data.frame(int_data %>% mutate(MTM = MTM,MAMTM = MAMTM,delta_MT = delta_MT))
+  return(int_data)
+}
+```
+
+MT指标的判定规则：
+ 
+•   如果MTM_{t}>0，且△MT_{t}>0，则MT指标给出利率处于趋势上行区间信号；
+•   如果MTM_{t}<0，且△MT_{t}<0，则MT指标给出利率处于趋势下行区间信号；
+•   否则，维持前一信号不变。
+```{r}
+MT_signal <- function(int_data){
+  # int_data = IND_MT
+  int_data$Re_MT <- apply(int_data,1,FUN = function(X) {  
+    ifelse(as.numeric(X['MTM'])>0&as.numeric(X['delta_MT'])>0,1,
+           ifelse(as.numeric(X['MTM'])<0&as.numeric(X['delta_MT'])<0,-1,NA))
+    })
+  int_data$Re_MT <- c(rep(NA,length(int_data$Re_MT)-length(na.locf(int_data$Re_MT))),na.locf(int_data$Re_MT))
+  return(int_data)
+}
+```
+MT指标的“直觉含义”。若某日的利率要被判定为处于上行趋势，需要满足两个条件。第一，当日利率需高于n天前的利率（即MTM_{t}>0）。第二，利率的上行速度不放缓，表现为近n日的上行幅度要高于前m个相同时长区间涨幅的均值（即△MT_{t}>0）。其中，第二个条件是用于判定利率“斜率”的二阶导，其灵敏度较高，能够比较早的识别趋势转向的早期信号。
+
+
+
+
+##识别波动
+波动指标的“核心特征”是均值回归。均值特征回归的出现一方面源于利率本身“上有顶，下有底”，另一方面源于寻顶探底的过程中，市场博弈力量的往复拉扯。从而使得利率围绕某个中枢来回摆动，从而形成“波动”。在技术分析中，有许多衡量“超买超卖”的指标，被用于把握短期波动的特征，例如KDJ、RSI、乖离率等。经过回测检验筛选，我们将希尔伯特变化（HT指标）作为衡量利率波动的指标。
+ 
+指标基本原理是，通过希尔伯特变换，找出金融时间序列数据中的规律，并通过当前信号所处于周期中的位置，对未来变动方向进行预测。希尔伯特变换是一种积分变换，在信号处理领域有着广泛的应用。后来，大家发现这一变换在金融时间序列数据的波动性分析上，也能够发挥作用。例如，站在15年5月中旬预测未来利率的方向：将10Y国债利率经过希尔伯特变化为波动指标后，分析其处于周期中的位置（sin函数的第四象限），再根据其所处的位置预测未来变动的方向（处于第四象限，未来方向为向上运动）。
+
+希尔伯特变化指标（HT指标）的计算方法：该指标希望分析时间序列数据的中短期波动，因此需要对原始数据消除其长期趋势和噪音。这里，采用移动平均线的方式去除噪音。进一步，对走势进行差分，消除趋势的影响。再对消除趋势和噪音后的时间序列，进行希尔伯特变换，计算信号指标。具体步骤为：
+ 
+•   消除噪音：对价格走势计算过去n日均线
+•   去除长期趋势影响：差分
+•   计算过去m日的希尔伯特变换指标
+ 
+HT指标的应用规则：
+ 
+•   如果变换后的指标处于第一和第四象限，则认为利率处于上行波段；
+•   如果变换后的指标处于第二和第三象限，则认为利率处于下行波段。
+```{R}
+#希尔伯特变换
+??HilbertTransform
+#
+HT_calculator <- function(int_data, series_name, HT_m, HT_n){
+  # int_data <- IND_MT
+  # series_name <- 'R_10'
+  interestArray <- int_data[,series_name]
+  # HT_m <- 80
+  # HT_n <- 20
+  #创建空序列
+  HT <- rep(NA, length(interestArray))
+  #循环体，计算HT指标
+  AVG_R <- SMA(interestArray, HT_n)
+  diff_R <- c(NA,diff(AVG_R))
+  for(i in c((HT_m+1):length(diff_R))){
+    # i=301
+    HT[i] = HilbertTransform(diff_R[(i-HT_m):i])[HT_m]
+  }
+  int_data <- as.data.frame(int_data %>% mutate(HT = HT))
+  return(int_data)
+}
+```
+
+##多空规则
+寻找“共振窗口”。模型试图通过MT指标来追踪趋势，通过HT指标来识别波动。当趋势和波动均处于向上窗口时，发出看空信号；当趋势和波动均处于向下窗口时，发出看多信号；当趋势和波动指标发生矛盾之时，不进行方向判定，认为利率处于“震荡期”。
+
+
+
+##参数选择
+通过历史回测进行参数选择。用于识别趋势的MT指标和识别波动的HT指标分别均包含两个与时间窗口相关的参数：n和m。我们使用2007/12/14至2017/12/31的10年期国债利率作为历史回测数据，进行参数选择。综合胜率、调仓频率、模拟资产组合累计收益率等指标，最终选择的参数为： MT_m = 40, MT_n = 60， HT_m = 80, HT_n = 20。
+```{r}
+#综合胜率、调仓频率、模拟资产组合累计收益率等指标，
+#胜率以信号为正期间，收益率或价格上行占交易日天数的比例，信号为负期间，收益率或价格下行占交易日天数的比例。信号为震荡，则比较收益率上行与下行的与1的比例。
+#调仓频率以平均调仓时间作为指标。
+#模拟资产累计收益率对于收益率序列而言，做多做空期间取绝对数，震荡期间为0，对于价格序列而言则以虚拟资金100万为起始资金计算最终净值。
+#win_rate_MT 
+
+
+
+win_rate <- function(int_data, series_name, HT_m, HT_n, MT_m, MT_n){
+  # int_data <- data
+  # series_name <- 'R_10'
+  # MT_m = 10
+  # MT_n = 90
+  # HT_m = 10
+  # HT_n = 90
+  # 计算收益率或价格与前一日的差值
+  int_data$CHANGE <- c(NA, diff(int_data[,series_name]))
+  #趋势指标
+  IND_MT <- MT_calculator(int_data, series_name, MT_m, MT_n)
+  IND_MT <- MT_signal(int_data=IND_MT)
+  #波动指标
+  IND_HT <- HT_calculator(int_data = IND_MT, series_name,  HT_m, HT_n)
+  #实部>0：看多；实部<0：看空
+  IND_HT$Re_HT <- ifelse(Re(IND_HT$HT)>0,1,-1)
+  IND_HT <- na.omit(IND_HT)
+  #寻找“共振区间”
+  IND_HT$SIGNAL <- ifelse(IND_HT$Re_MT>0&IND_HT$Re_HT>0,1,ifelse(IND_HT$Re_MT<0&IND_HT$Re_HT<0,-1,NA))
+  IND_HT$SIGNAL <- ifelse(is.na(IND_HT$SIGNAL),0,IND_HT$SIGNAL)
+  # 胜率：如果收益率上升或者价格上升则对应于信号为正的方向胜利，如果为负且对应于信号为负的方向胜利，如果持平或信号为0
+  IND_HT$win <- ifelse(IND_HT$CHANGE*IND_HT$SIGNAL>0,1,ifelse(IND_HT$CHANGE*IND_HT$SIGNAL<0,-1,0))
+  winrate <- table(IND_HT$win)[3]/(table(IND_HT$SIGNAL)[1] + table(IND_HT$SIGNAL)[3])
+  # 调仓频率：
+  IND_HT$positionChange <- c(0, abs(diff(IND_HT$SIGNAL)))
+  IND_HT$positionChange <- ifelse(IND_HT$positionChange == 0,0,1)
+  freq <- length(IND_HT$positionChange)/sum(IND_HT$positionChange)
+  # 累计收益率：累加价格变动（或收益率变动）与模型方向的乘积
+  IND_HT$cumSeries <- IND_HT[,series_name] + cumsum(IND_HT$CHANGE*IND_HT$SIGNAL)
+  cumSeries <- IND_HT$cumSeries[length(IND_HT$cumSeries)]
+  return(c(as.numeric(winrate), freq, cumSeries))
+  # return(IND_HT)
+}
+data <- read.csv("国债到期收益率(中证)(日).csv")
+# head(data)
+data$DATE_ID <- as.Date(data$DATE_ID)
+# 以2007/12/14至2017/12/31的10年期国债利率作为历史回测
+data <- subset(data,DATE_ID <= as.Date('2018-01-01'))
+result <- data.frame(num = c(1:99),MT_m = NA, MT_n = NA, HT_m = NA, HT_n = NA, winrate = NA, freq = NA, cumSeries = NA)
+# 由于MT_m必须小于MT_n，所以MT_m必须小于60
+for (m in seq(10, 50, by = 10)) {
+  for (n in seq(10, 90, by = 10)) {
+    temp <- win_rate(int_data=data,series_name='R_10', MT_m = m, MT_n = (100-m), HT_m = n, HT_n = (100-n))
+    result[m+(n/10),c(2:8)] <- c(m,(100-m),n,(100-n),temp[1],temp[2],temp[3])
+  }
+}
+result <- na.omit(result)
+# 
+write.csv(result,"result.csv")
+data <- win_rate(int_data=data,series_name='R_10', MT_m = 40, MT_n = 60, HT_m = 80, HT_n = 20)
+write.csv(data,"data.csv")
+# 综合胜率从低向高、调仓频率越慢越好、模拟资产组合累计收益率最高越好
+result <- as.data.frame(result %>% mutate(rank_winrate = rank(winrate),rank_freq = rank(freq),rank_cumSeries = rank(cumSeries)))
+result$rank <- result$rank_winrate + result$rank_freq + result$rank_cumSeries
+
+chart1 <- scatterplot3d(result$MT_m,result$HT_m,result$rank_winrate,highlight.3d = TRUE)
+chart2 <- scatterplot3d(result$MT_m,result$HT_m,result$rank_freq,highlight.3d = TRUE)
+chart3 <- scatterplot3d(result$MT_m,result$HT_m,result$rank_cumSeries,highlight.3d = TRUE)
+chart4 <- scatterplot3d(result$MT_m,result$HT_m,result$rank,highlight.3d = TRUE)
+
+
+```
+
+```{r}
+#读取2007年12月14日至2020年11月16日十年国债到期收益率序列
+data <- read.csv("国债到期收益率(中证)(日).csv")
+# head(data)
+data$DATE_ID <- as.Date(data$DATE_ID)
+#以2007/12/14至2017/12/31的10年期国债利率作为历史回测
+data <- subset(data,DATE_ID <= as.Date('2018-01-01'))
+#趋势指标
+IND_MT <- MT_calculator(int_data = data, series_name = 'R_10', MT_m = 10, MT_n = 90)
+IND_MT <- MT_signal(int_data=IND_MT)
+#波动指标
+IND_HT <- HT_calculator(int_data = IND_MT, series_name = 'R_10', HT_m = 40, HT_n = 60)
+#实部>0：看多；实部<0：看空
+IND_HT$Re_HT <- ifelse(Re(IND_HT$HT)>0,1,-1)
+IND_HT <- na.omit(IND_HT)
+#寻找“共振区间”
+IND_HT$SIGNAL <- ifelse(IND_HT$Re_MT>0&IND_HT$Re_HT>0,1,ifelse(IND_HT$Re_MT<0&IND_HT$Re_HT<0,-1,NA))
+IND_HT$SIGNAL <- ifelse(is.na(IND_HT$SIGNAL),0,IND_HT$SIGNAL)
+write.csv(IND_HT,'IND_HT.csv')
+#为了方便作图，将数字信号改为文本
+IND_HT$Re_HT <- ifelse(IND_HT$Re_HT == 1,'up',ifelse(IND_HT$Re_HT == -1,'down','steady'))
+IND_HT$Re_MT <- ifelse(IND_HT$Re_MT == 1,'up',ifelse(IND_HT$Re_MT == -1,'down','steady'))
+IND_HT$SIGNAL <- ifelse(IND_HT$SIGNAL == 1,'up',ifelse(IND_HT$SIGNAL == -1,'down','steady'))
+#在十年期利率走势图中划出判断的结果。
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = Re_HT))+geom_point()
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = Re_MT))+geom_point()
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = SIGNAL))+geom_point()
+```
+##样本外检验
+样本外利用2018年1月1日之后的10年期国债利率作为样本外测试数据。
+```{r}
+#读取2007年12月14日至2020年11月16日十年国债到期收益率序列
+data <- read.csv("国债到期收益率(中证)(日).csv")
+# head(data)
+data$DATE_ID <- as.Date(data$DATE_ID)
+#趋势指标
+IND_MT <- MT_calculator(int_data=data, series_name = 'R_10',MT_m = 40,MT_n= 60)
+IND_MT <- MT_signal(int_data=IND_MT)
+#波动指标
+IND_HT <- HT_calculator(int_data=IND_MT, series_name = 'R_10',HT_m = 80,HT_n = 20)
+#实部>0：看多；实部<0：看空
+IND_HT$Re_HT <- ifelse(Re(IND_HT$HT)>0,1,-1)
+#样本外2018年
+IND_HT <- subset(IND_HT,DATE_ID > as.Date('2018-01-01'))
+IND_HT <- na.omit(IND_HT)
+#寻找“共振区间”
+IND_HT$SIGNAL <- ifelse(IND_HT$Re_MT>0&IND_HT$Re_HT>0,1,ifelse(IND_HT$Re_MT<0&IND_HT$Re_HT<0,-1,NA))
+IND_HT$SIGNAL <- ifelse(is.na(IND_HT$SIGNAL),0,IND_HT$SIGNAL)
+
+#为了方便作图，将数字信号改为文本
+IND_HT$Re_HT <- ifelse(IND_HT$Re_HT == 1,'up',ifelse(IND_HT$Re_HT == -1,'down','steady'))
+IND_HT$Re_MT <- ifelse(IND_HT$Re_MT == 1,'up',ifelse(IND_HT$Re_MT == -1,'down','steady'))
+IND_HT$SIGNAL <- ifelse(IND_HT$SIGNAL == 1,'up',ifelse(IND_HT$SIGNAL == -1,'down','steady'))
+#在十年期利率走势图中划出判断的结果。
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = Re_HT))+geom_point()
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = Re_MT))+geom_point()
+ggplot(IND_HT,aes(x=DATE_ID,y=R_10,colour = SIGNAL))+geom_point()
+```
+## 策略设计
+由于无法在国债现货中进行交易，所以我们在10年期国债期货的主力合约上进行交易。交易时间区间为2015年8月17日至2020年11月16日。
+计算十年期国债期货主力合约的隐含收益率，用隐含收益率计算给出多空信号。
+假设初始本金为100万元。当交易信号为向上时则在下一个交易日做多，当交易信号为向下则在下一个交易日做空，如果交易信号为平稳则在下一个交易日空仓。T合约开仓手数s=开仓时账户金额/1*2%*p，其中p为10年期国债期货合约的结算价，开仓手数向下取整。
+
+
+
+
+
+
+
+
